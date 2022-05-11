@@ -43,7 +43,7 @@ class DataSpace {
 	}
 
 	save(isForce) {
-		if (this[DataSpaceSymbols.haveBeenChange] || isForce) {
+		if (this[DataSpaceSymbols.haveBeenChange] || !this[DataSpaceSymbols.saveTimeout] || isForce) {
 			this[DataSpaceSymbols.haveBeenChange] = false;
 			fs.writeFileSync(this._dataPath, JSON.stringify(this[DataSpaceSymbols.data]));
 		}
@@ -53,6 +53,7 @@ class DataSpace {
 		if (!this[DataSpaceSymbols.data].tables[table]) {
 			this[DataSpaceSymbols.data].tables[table] = [];
 		}
+
 		if (config) {
 			if (!this[DataSpaceSymbols.data].config) {
 				this[DataSpaceSymbols.data].config = {};
@@ -62,11 +63,10 @@ class DataSpace {
 				this[DataSpaceSymbols.data].config[table].idMethod = config.idMethod.trim();
 			}
 		}
-		this.save();
-	}
 
-	getTable(table) {
-		return this[DataSpaceSymbols.data].tables[table];
+		this[DataSpaceSymbols.haveBeenChange] = true;
+
+		this.save();
 	}
 
 	add(table, data) {
@@ -78,12 +78,15 @@ class DataSpace {
 			}
 		}
 		this[DataSpaceSymbols.data].tables[table].push(dataCopy);
+
+		this[DataSpaceSymbols.haveBeenChange] = true;
+
 		this.save();
 
 		return dataCopy;
 	}
 
-	remove(table, fieldValues) {
+	removeOne(table, fieldValues) {
 		let findedTable = this[DataSpaceSymbols.data].tables[table],
 			findedItemIndex = null;
 
@@ -100,13 +103,49 @@ class DataSpace {
 		}
 		if (findedItemIndex !== null) {
 			findedTable.splice(i, 1);
+
+			this[DataSpaceSymbols.haveBeenChange] = true;
+
 			this.save();
 		}
 	}
 
-	change(table, fieldValues, newValues) {
-		if (newValues.id) {
-			throw new Error(`Update object { ${Object.keys(newValues).map((k, i, a) => k + ': ' + newValues[k] + (i !== a.length - 1 ? ',' : '')).join('')} } for table: ${table} has forbidden update field ':id'`);
+	removeItems(table, fieldValues) {
+		let findedTable = this[DataSpaceSymbols.data].tables[table],
+			findedItemIndex = [];
+
+		for(let i in findedTable) {
+			let item = findedTable[i];
+
+			for(let f in fieldValues) {
+				if (!isEquivalent(item[f], fieldValues[f])) {
+					continue;
+				}
+			}
+			findedItemIndex.push(i);
+		}
+		findedItemIndex.forEach((itemIndex, index) => {
+			findedTable.splice(itemIndex - index, 1);
+		});
+		if (findedItemIndex.length) {
+			this[DataSpaceSymbols.haveBeenChange] = true;
+
+			this.save();
+		}
+	}
+
+	removeTable(table) {
+		delete this[DataSpaceSymbols.data].tables[table];
+		delete this[DataSpaceSymbols.data].config[table];
+
+		this[DataSpaceSymbols.haveBeenChange] = true;
+
+		this.save();
+	}
+
+	change(table, fieldValues, newValues, isFullChange) {
+		if (this[DataSpaceSymbols.data].config[table].idMethod && typeof newValues.id === 'number') {
+			return new OperationStatus(false, -1, `Update object { ${Object.keys(newValues).map((k, i, a) => k + ': ' + newValues[k] + (i !== a.length - 1 ? ',' : '')).join('')} } for table: ${table} has forbidden update field ':id'`);
 		}
 
 		let items = getItems.apply(this, [ table, fieldValues ]);
@@ -119,25 +158,35 @@ class DataSpace {
 			return new OperationStatus(false, -1, `Multiple items found for your request ${JSON.stringify(fieldValues)}`);
 		}
 
-		for(let p in newValues) {
+		for (let p in newValues) {
 			items[0][p] = newValues[p];
+		}
+
+		if (isFullChange) {
+			for (let p in items[0]) {
+				if (!newValues.getOwnPropertyDescriptor(p)) {
+					delete items[0][p];
+				}
+			}
 		}
 
 		this[DataSpaceSymbols.haveBeenChange] = true;
 
-		if (!this[DataSpaceSymbols.saveTimeout]) {
-			this.save();
-		}
+		this.save();
 
 		return new OperationStatus();
 	}
 
-	getOne(table, fieldValues, optionalFields) {
-		return twin(getItem.apply(this, [ table, fieldValues, optionalFieldsValues ]));
+	getOne(table, fieldValues, optionalFieldValues) {
+		return twin(getItem.apply(this, [ table, fieldValues, optionalFieldValues ]));
 	}
 
-	getItems(table, fieldValues, optionalFieldsValues) {
-		return getItems.apply(this, [ table, fieldValues, optionalFieldsValues ]).map(item => twin(item));
+	getItems(table, fieldValues, optionalFieldValues) {
+		return getItems.apply(this, [ table, fieldValues, optionalFieldValues ]).map(item => twin(item));
+	}
+
+	getTable(table) {
+		return twin(this[DataSpaceSymbols.data].tables[table]);
 	}
 }
 
@@ -178,7 +227,7 @@ function getItem(table, fieldValues, optionalFields) {
 	return null;
 }
 
-function getItems(table, fieldValues, optionalFields) {
+function getItems(table, fieldValues, optionalFieldValues) {
 	let findedTable = this[DataSpaceSymbols.data].tables[table],
 		res = [];
 
@@ -190,9 +239,9 @@ function getItems(table, fieldValues, optionalFields) {
 				continue checkItem;
 			}
 		}
-		if (optionalFields) {
-			for(let f in optionalFields) {
-				if (isEquivalent(item[f], optionalFields[f])) {
+		if (optionalFieldValues) {
+			for(let f in optionalFieldValues) {
+				if (isEquivalent(item[f], optionalFieldValues[f])) {
 					res.push(item);
 					continue checkItem;
 				}
@@ -218,6 +267,10 @@ function defaultSpaceData() {
 }
 
 function twin(o) {
+	if (o === undefined || o === NaN || o === null) {
+		return o;
+	}
+
 	let n = o instanceof Array ? [] : {};
 
 	for(let p in o) {
@@ -231,7 +284,7 @@ function twin(o) {
 	return n;
 }
 const idMethods = {
-	time: function(options) {
+	/*time: function(options) {
 		let id = new Date().getTime().toString(),
 			n = parseInt(options);
 
@@ -240,9 +293,19 @@ const idMethods = {
 		}
 
 		return id;
-	},
+	},*/
 	increament: function(options, tableName) {
-		return this[DataSpaceSymbols.data].tables[tableName].length;
+		const index = this[DataSpaceSymbols.data].config[tableName].lastIndex;
+
+		if (typeof index !== 'number') {
+			this[DataSpaceSymbols.data].config[tableName].lastIndex = 0;
+
+			return 0;
+		} else {
+			this[DataSpaceSymbols.data].config[tableName].lastIndex += 1;
+
+			return this[DataSpaceSymbols.data].config[tableName].lastIndex;
+		}
 	}
 };
 
